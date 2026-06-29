@@ -1,0 +1,223 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: cnpj-postgres
+    env_file:
+      - ../.env
+    environment:
+      POSTGRES_DB: ${PG_DATABASE:-cnpj_datalake}
+      POSTGRES_USER: ${PG_SUPERUSER:-postgres}
+      POSTGRES_PASSWORD: ${PG_SUPERUSER_PASSWORD:-postgres_change_me}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "127.0.0.1:${PG_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../services/postgres/init-db.sh:/docker-entrypoint-initdb.d/01-init-db.sh
+      - ../services/postgres/schemas.sql:/docker-entrypoint-initdb.d/02-schemas.sql
+    networks:
+      - datalake_network
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_SUPERUSER:-postgres} -d ${PG_DATABASE:-cnpj_datalake}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: cnpj-minio
+    env_file:
+      - ../.env
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio_root}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio_root_change_me}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio_data:/minio_data
+    command: server /minio_data --console-address ":9001"
+    networks:
+      - datalake_network
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: cnpj-minio-init
+    env_file:
+      - ../.env
+    depends_on:
+      minio:
+        condition: service_healthy
+    volumes:
+      - ../services/minio/init-minio.sh:/init-minio.sh:ro
+    networks:
+      - datalake_network
+    entrypoint: ["/bin/sh", "/init-minio.sh"]
+
+  jupyter:
+    image: jupyter/datascience-notebook:latest
+    container_name: cnpj-jupyter
+    env_file:
+      - ../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${JUPYTER_PORT:-8888}:8888"
+    environment:
+      JUPYTER_ENABLE_LAB: "yes"
+      PG_HOST: postgres
+      MINIO_ENDPOINT: minio:9000
+    volumes:
+      - ../notebooks:/home/jovyan/work
+      - ../datalake:/home/jovyan/datalake
+      - ../data:/home/jovyan/data
+      - ../src:/home/jovyan/src
+    networks:
+      - datalake_network
+    command: >
+      start-notebook.sh
+      --NotebookApp.token='${JUPYTER_TOKEN:-cnpj_token_change_me}'
+      --NotebookApp.password='${JUPYTER_PASSWORD:-}'
+    restart: unless-stopped
+
+  airflow-init:
+    build:
+      context: ../services/airflow
+      dockerfile: Dockerfile
+    container_name: cnpj-airflow-init
+    env_file:
+      - ../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASSWORD:-airflow_change_me}@postgres:5432/${PG_DATABASE:-cnpj_datalake}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:-change_me}
+      AIRFLOW_UID: ${AIRFLOW_UID:-50000}
+      PYTHONPATH: /opt/airflow
+      PG_HOST: postgres
+      MINIO_ENDPOINT: minio:9000
+    volumes:
+      - ../services/airflow/dags:/opt/airflow/dags
+      - ../logs:/opt/airflow/logs
+      - ../src:/opt/airflow/src
+      - ../data:/opt/airflow/data
+    networks:
+      - datalake_network
+    command:
+      - bash
+      - -c
+      - >
+        airflow db migrate &&
+        (airflow users create --username ${AIRFLOW_ADMIN_USERNAME:-admin} --firstname Airflow --lastname Admin --role Admin --email ${AIRFLOW_ADMIN_EMAIL:-admin@local} --password ${AIRFLOW_ADMIN_PASSWORD:-admin_change_me}
+        || airflow users reset-password --username ${AIRFLOW_ADMIN_USERNAME:-admin} --password ${AIRFLOW_ADMIN_PASSWORD:-admin_change_me})
+
+  airflow-webserver:
+    build:
+      context: ../services/airflow
+      dockerfile: Dockerfile
+    container_name: cnpj-airflow-webserver
+    env_file:
+      - ../.env
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASSWORD:-airflow_change_me}@postgres:5432/${PG_DATABASE:-cnpj_datalake}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:-change_me}
+      PYTHONPATH: /opt/airflow
+      PG_HOST: postgres
+      MINIO_ENDPOINT: minio:9000
+    ports:
+      - "127.0.0.1:${AIRFLOW_PORT:-8080}:8080"
+    volumes:
+      - ../services/airflow/dags:/opt/airflow/dags
+      - ../logs:/opt/airflow/logs
+      - ../src:/opt/airflow/src
+      - ../data:/opt/airflow/data
+    command: webserver
+    networks:
+      - datalake_network
+    restart: unless-stopped
+
+  airflow-scheduler:
+    build:
+      context: ../services/airflow
+      dockerfile: Dockerfile
+    container_name: cnpj-airflow-scheduler
+    env_file:
+      - ../.env
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASSWORD:-airflow_change_me}@postgres:5432/${PG_DATABASE:-cnpj_datalake}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:-change_me}
+      PYTHONPATH: /opt/airflow
+      PG_HOST: postgres
+      MINIO_ENDPOINT: minio:9000
+    volumes:
+      - ../services/airflow/dags:/opt/airflow/dags
+      - ../logs:/opt/airflow/logs
+      - ../src:/opt/airflow/src
+      - ../data:/opt/airflow/data
+    command: scheduler
+    networks:
+      - datalake_network
+    restart: unless-stopped
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: cnpj-pgadmin
+    env_file:
+      - ../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@local}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin_change_me}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    ports:
+      - "127.0.0.1:${PGADMIN_PORT:-5050}:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    networks:
+      - datalake_network
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  postgres_data:
+  minio_data:
+  pgadmin_data:
+
+networks:
+  datalake_network:
+    driver: bridge

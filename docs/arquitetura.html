@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CNPJ DataLake - Arquitetura</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 2rem;
+    }
+    h1 {
+      text-align: center;
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: #f8fafc;
+      margin-bottom: 0.25rem;
+      letter-spacing: 0.05em;
+    }
+    .subtitle {
+      text-align: center;
+      font-size: 0.85rem;
+      color: #94a3b8;
+      margin-bottom: 2rem;
+    }
+    .diagram-container {
+      background: #ffffff;
+      border-radius: 12px;
+      padding: 2rem;
+      max-width: 1200px;
+      margin: 0 auto;
+      box-shadow: 0 25px 50px rgba(0,0,0,0.5);
+      overflow-x: auto;
+    }
+    .mermaid {
+      display: flex;
+      justify-content: center;
+    }
+    .legend {
+      max-width: 1200px;
+      margin: 1.5rem auto 0;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      justify-content: center;
+    }
+    .toolbar {
+      max-width: 1200px;
+      margin: 0 auto 1rem;
+      display: flex;
+      justify-content: center;
+      gap: 0.75rem;
+    }
+    .btn {
+      background: #1e293b;
+      border: 1px solid #334155;
+      color: #e2e8f0;
+      border-radius: 8px;
+      padding: 0.55rem 0.9rem;
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .btn:hover {
+      background: #334155;
+      border-color: #475569;
+    }
+    .hint {
+      text-align: center;
+      font-size: 0.8rem;
+      color: #94a3b8;
+      margin-bottom: 1rem;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-size: 0.8rem;
+      color: #cbd5e1;
+    }
+    .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+      flex-shrink: 0;
+    }
+  </style>
+</head>
+<body>
+  <h1>CNPJ DataLake - Arquitetura</h1>
+  <p class="subtitle">PySpark | MinIO | PostgreSQL | Apache Airflow | Groq/Llama 3.3</p>
+  <div class="toolbar">
+    <button class="btn" id="export-svg" type="button">Exportar SVG</button>
+    <button class="btn" id="export-png" type="button">Exportar PNG</button>
+  </div>
+  <p class="hint">Use os botoes para baixar o diagrama atualizado para documentacao ou apresentacoes.</p>
+
+  <div class="diagram-container">
+    <pre class="mermaid">
+
+flowchart TB
+  subgraph INPUT["Entrada de Dados"]
+    RF["Receita Federal\n(arquivos .txt)"]
+    DATA["data/input/{dataset}/\n(nome padrao ou nome cru)\nzip deve ser descompactado"]
+    end
+
+  subgraph ORCH["Orquestracao"]
+        AF["Apache Airflow\nlocalhost:8080"]
+    CLI["CLI\nservices/pyspark/cli/run_pipeline.py"]
+    DAG2["9 DAGs por dataset\ncnpj_empresas_pipeline\ncnpj_estabelecimentos_pipeline\n...\ncnpj_qualificacoes_pipeline"]
+    AF --> DAG2
+    end
+
+  subgraph PIPELINE["Pipeline PySpark"]
+        direction TB
+    BRONZE["Bronze Layer\nbronze.py\n- le .txt latin1\n- mapeia colunas\n- valida layout\n- adiciona metadata"]
+    SILVER["Silver Layer\nsilver.py\n- trim strings + remove aspas\n- cast de tipos\n- parse capital_social BR\n- dropDuplicates\n- quality check"]
+    GOLD["Gold Layer\ngold.py\n- clean passthrough por file_type\n- tabelas detalhadas (empresas/estabelecimentos/socios)\n- referencias (cnaes/motivos/...)\n- write Postgres com filtro de colunas validas"]
+        BRONZE --> SILVER --> GOLD
+    end
+
+  subgraph STORAGE["Armazenamento"]
+    subgraph MINIO["MinIO localhost:9000"]
+      B_BUCKET["cnpj-bronze/{version}/{tipo}/*.parquet"]
+      S_BUCKET["cnpj-silver/{version}/{tipo}/*.parquet"]
+      G_BUCKET["cnpj-gold/{version}/{dataset}/*.parquet"]
+      CONS["data/consumed/{dataset}/{version}/"]
+        end
+    subgraph PG["PostgreSQL localhost:5432"]
+      META["cnpj_metadata\npipeline_execution\nprocessing_log"]
+      GOLD_TB["cnpj_gold\nempresas\nestabelecimentos\nsocios\ncnaes/motivos/municipios/...\n+ dataset_month/data_version"]
+        end
+    end
+
+  subgraph CONSUME["Consumo"]
+        PGADMIN["pgAdmin\nlocalhost:5050"]
+        subgraph AGENT["agente-contabilizei-tcc"]
+      ACCESS["Fonte principal: Postgres\nFallback: DuckDB + MinIO\nDescoberta prioriza tabelas com dados"]
+      LLM["Groq API\nLlama 3.3 70b"]
+            UI["Streamlit\nlocalhost:8501"]
+      ACCESS --> LLM --> UI
+        end
+    end
+
+    RF --> DATA
+  DATA --> DAG2
+  DATA --> CLI
+  DAG2 --> BRONZE
+  CLI --> BRONZE
+
+    BRONZE -->|Parquet| B_BUCKET
+    SILVER -->|Parquet| S_BUCKET
+    GOLD -->|Parquet| G_BUCKET
+  GOLD -->|JDBC| GOLD_TB
+  PIPELINE -->|execucao log| META
+  PIPELINE -->|pos-consumo| CONS
+
+    GOLD_TB --> PGADMIN
+  G_BUCKET -->|fallback| ACCESS
+  GOLD_TB -->|principal| ACCESS
+
+    style INPUT fill:#dbeafe,stroke:#3b82f6,color:#1e3a5f
+    style ORCH fill:#fef9c3,stroke:#eab308,color:#713f12
+    style PIPELINE fill:#dcfce7,stroke:#22c55e,color:#14532d
+    style STORAGE fill:#fce7f3,stroke:#ec4899,color:#831843
+    style CONSUME fill:#ede9fe,stroke:#8b5cf6,color:#3b0764
+    style AGENT fill:#ddd6fe,stroke:#7c3aed,color:#2e1065
+    style MINIO fill:#fff7ed,stroke:#f97316,color:#7c2d12
+    style PG fill:#f0f9ff,stroke:#0ea5e9,color:#0c4a6e
+
+    </pre>
+  </div>
+
+  <div class="legend">
+    <div class="legend-item"><div class="dot" style="background:#3b82f6"></div> Entrada de Dados</div>
+    <div class="legend-item"><div class="dot" style="background:#eab308"></div> Orquestração (Airflow/CLI)</div>
+    <div class="legend-item"><div class="dot" style="background:#22c55e"></div> Pipeline PySpark</div>
+    <div class="legend-item"><div class="dot" style="background:#f97316"></div> MinIO (Object Storage)</div>
+    <div class="legend-item"><div class="dot" style="background:#0ea5e9"></div> PostgreSQL (Metadados + Data Mart)</div>
+    <div class="legend-item"><div class="dot" style="background:#8b5cf6"></div> Consumo (Agente IA)</div>
+  </div>
+
+  <script>
+    mermaid.initialize({ startOnLoad: true, theme: 'default', securityLevel: 'loose' });
+
+    function getRenderedSvg() {
+      return document.querySelector('.diagram-container svg');
+    }
+
+    function downloadBlob(blob, fileName) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function exportSvg() {
+      const svg = getRenderedSvg();
+      if (!svg) {
+        alert('Diagrama ainda nao renderizado. Aguarde alguns segundos e tente novamente.');
+        return;
+      }
+      const svgText = new XMLSerializer().serializeToString(svg);
+      const blob = new Blob([svgText], { type: 'image/svg+xml;charset=utf-8' });
+      downloadBlob(blob, 'cnpj-datalake-arquitetura.svg');
+    }
+
+    function exportPng() {
+      const svg = getRenderedSvg();
+      if (!svg) {
+        alert('Diagrama ainda nao renderizado. Aguarde alguns segundos e tente novamente.');
+        return;
+      }
+
+      const svgText = new XMLSerializer().serializeToString(svg);
+      const svgBlob = new Blob([svgText], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(svgBlob);
+      const img = new Image();
+
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width || 2200;
+        canvas.height = img.height || 1400;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0);
+        URL.revokeObjectURL(url);
+
+        canvas.toBlob((blob) => {
+          if (!blob) {
+            alert('Nao foi possivel gerar PNG.');
+            return;
+          }
+          downloadBlob(blob, 'cnpj-datalake-arquitetura.png');
+        }, 'image/png');
+      };
+
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        alert('Falha ao converter diagrama para PNG.');
+      };
+
+      img.src = url;
+    }
+
+    document.getElementById('export-svg').addEventListener('click', exportSvg);
+    document.getElementById('export-png').addEventListener('click', exportPng);
+  </script>
+</body>
+</html>

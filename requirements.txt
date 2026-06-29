@@ -1,0 +1,7 @@
+# Runtime enxuto do CNPJ DataLake
+# Para ferramentas de desenvolvimento/notebook, use extras do pyproject.toml.
+
+pyspark>=3.5.1
+minio>=7.1.0
+psycopg2-binary>=2.9.0
+python-dotenv>=0.21.0

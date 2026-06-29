@@ -1,0 +1,58 @@
+#!/bin/sh
+set -eu
+
+APP_DB="${PG_DATABASE:-cnpj_datalake}"
+APP_USER="${PG_USER:-datalake_app}"
+APP_PASSWORD="${PG_PASSWORD:-datalake_app_change_me}"
+OWNER_ROLE="${PG_OWNER_ROLE:-datalake_owner}"
+AIRFLOW_USER="${AIRFLOW_DB_USER:-airflow}"
+AIRFLOW_PASSWORD="${AIRFLOW_DB_PASSWORD:-airflow_change_me}"
+
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$APP_DB" <<-EOSQL
+DO
+\$\$
+BEGIN
+	IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${OWNER_ROLE}') THEN
+		EXECUTE format('CREATE ROLE %I NOLOGIN', '${OWNER_ROLE}');
+	END IF;
+END
+\$\$;
+
+DO
+\$\$
+BEGIN
+	IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${APP_USER}') THEN
+		EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %L', '${APP_USER}', '${APP_PASSWORD}');
+	ELSE
+		EXECUTE format('ALTER ROLE %I WITH LOGIN PASSWORD %L', '${APP_USER}', '${APP_PASSWORD}');
+	END IF;
+END
+\$\$;
+
+DO
+\$\$
+BEGIN
+	IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${AIRFLOW_USER}') THEN
+		EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %L', '${AIRFLOW_USER}', '${AIRFLOW_PASSWORD}');
+	ELSE
+		EXECUTE format('ALTER ROLE %I WITH LOGIN PASSWORD %L', '${AIRFLOW_USER}', '${AIRFLOW_PASSWORD}');
+	END IF;
+END
+\$\$;
+
+REVOKE ALL ON DATABASE ${APP_DB} FROM PUBLIC;
+GRANT CONNECT, TEMP ON DATABASE ${APP_DB} TO ${APP_USER};
+GRANT CONNECT, TEMP ON DATABASE ${APP_DB} TO ${AIRFLOW_USER};
+
+GRANT USAGE, CREATE ON SCHEMA public TO ${AIRFLOW_USER};
+
+ALTER ROLE ${APP_USER} IN DATABASE ${APP_DB}
+	SET statement_timeout = '15min';
+ALTER ROLE ${APP_USER} IN DATABASE ${APP_DB}
+	SET idle_in_transaction_session_timeout = '5min';
+
+ALTER ROLE ${AIRFLOW_USER} IN DATABASE ${APP_DB}
+	SET statement_timeout = '15min';
+ALTER ROLE ${AIRFLOW_USER} IN DATABASE ${APP_DB}
+	SET idle_in_transaction_session_timeout = '5min';
+EOSQL
