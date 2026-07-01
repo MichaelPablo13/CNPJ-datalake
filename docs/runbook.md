@@ -36,6 +36,9 @@ docker compose -f infra/docker-compose.yml up -d --build
 | Airflow | http://localhost:8080 | admin / valor de AIRFLOW_ADMIN_PASSWORD |
 | MinIO Console | http://localhost:9001 | minio_root / minio_root_123 |
 | pgAdmin | http://localhost:5050 | admin@local.com / admin |
+| Pushgateway | http://localhost:9091 | sem autenticacao |
+| Prometheus | http://localhost:9090 | sem autenticacao |
+| Grafana | http://localhost:3000 | admin / valor de GRAFANA_ADMIN_PASSWORD |
 
 ---
 
@@ -194,6 +197,20 @@ python src/scripts/profile_source_files.py --folder data/input/empresas
 
 Mostra contagem de colunas e primeira linha de cada arquivo.
 
+Se houver acentuacao quebrada (ex.: "?" ou sequencias estranhas), rode o diagnostico de encoding:
+
+```powershell
+python src/scripts/detect_input_encoding.py data/input/empresas
+```
+
+Depois ajuste no `.env`:
+
+```env
+INPUT_FILE_ENCODING=latin1
+```
+
+Se necessario, teste `cp1252` e reexecute a ingestao.
+
 ---
 
 ## 7. Empacotar
@@ -244,6 +261,51 @@ Comportamento do script:
 - remove no Postgres apenas as linhas da tabela alvo no mes informado (`dataset_month`/`data_version`);
 - limpa objetos do mesmo dataset/mes nos buckets Bronze, Silver e Gold no MinIO;
 - executa nova ingestao Bronze -> Silver -> Gold com o `run_pipeline()`.
+
+---
+
+## 10. Observabilidade (Prometheus + Grafana)
+
+Com a stack em pe, o pipeline publica metricas no Pushgateway e o Prometheus coleta automaticamente.
+
+Subir apenas observabilidade:
+
+```powershell
+docker compose -f infra/docker-compose.yml up -d pushgateway prometheus grafana
+```
+
+Validar endpoints:
+
+```powershell
+curl http://localhost:9091/metrics
+curl http://localhost:9090/-/healthy
+curl http://localhost:3000/api/health
+```
+
+Se as DAGs ja estiverem rodando antes da mudanca de `.env`, recarregue os servicos Airflow para aplicar `PROMETHEUS_PUSHGATEWAY_URL`:
+
+```powershell
+docker compose -f infra/docker-compose.yml up -d airflow-webserver airflow-scheduler
+```
+
+No Grafana, o datasource Prometheus e o dashboard `CNPJ Pipeline Overview` sao provisionados automaticamente.
+
+Escopo baseline atual do dashboard `cnpj-pipeline-overview`:
+- paineis de execucao/sucesso/falha por stage;
+- duracao e registros por stage/file_type;
+- fallback de encoding: linhas corrigidas e trocas de encoding.
+
+Consultas PromQL de referencia:
+
+```promql
+sum(cnpj_pipeline_stage_runs_total)
+sum by (stage, file_type) (cnpj_pipeline_records_total)
+sum by (file_type, from_encoding, to_encoding) (cnpj_pipeline_encoding_fallback_events_total)
+sum(cnpj_pipeline_encoding_fallback_corrected_rows_total)
+```
+
+Observacao:
+- o baseline nao inclui metricas/paineis experimentais de comportamento de IA e utilizacao de objetos de dados.
 
 Opcoes uteis:
 - `--table cnpj_gold.empresas` para forcar tabela especifica;

@@ -93,7 +93,7 @@
 </head>
 <body>
   <h1>CNPJ DataLake - Arquitetura</h1>
-  <p class="subtitle">PySpark | MinIO | PostgreSQL | Apache Airflow | Groq/Llama 3.3</p>
+    <p class="subtitle">PySpark | MinIO | PostgreSQL | Apache Airflow | Pushgateway | Prometheus | Grafana | Groq/Llama 3.3</p>
   <div class="toolbar">
     <button class="btn" id="export-svg" type="button">Exportar SVG</button>
     <button class="btn" id="export-png" type="button">Exportar PNG</button>
@@ -168,6 +168,12 @@ flowchart TB
     style ORCH fill:#fef9c3,stroke:#eab308,color:#713f12
     style PIPELINE fill:#dcfce7,stroke:#22c55e,color:#14532d
     style STORAGE fill:#fce7f3,stroke:#ec4899,color:#831843
+      subgraph OBS["Observabilidade"]
+        PUSH["Pushgateway\nlocalhost:9091"]
+        PROM["Prometheus\nlocalhost:9090"]
+        GRAF["Grafana\nCNPJ Pipeline Overview"]
+        PUSH --> PROM --> GRAF
+      end
     style CONSUME fill:#ede9fe,stroke:#8b5cf6,color:#3b0764
     style AGENT fill:#ddd6fe,stroke:#7c3aed,color:#2e1065
     style MINIO fill:#fff7ed,stroke:#f97316,color:#7c2d12
@@ -182,6 +188,7 @@ flowchart TB
     <div class="legend-item"><div class="dot" style="background:#22c55e"></div> Pipeline PySpark</div>
     <div class="legend-item"><div class="dot" style="background:#f97316"></div> MinIO (Object Storage)</div>
     <div class="legend-item"><div class="dot" style="background:#0ea5e9"></div> PostgreSQL (Metadados + Data Mart)</div>
+      <div class="legend-item"><div class="dot" style="background:#0284c7"></div> Observabilidade (Pushgateway/Prometheus/Grafana)</div>
     <div class="legend-item"><div class="dot" style="background:#8b5cf6"></div> Consumo (Agente IA)</div>
   </div>
 

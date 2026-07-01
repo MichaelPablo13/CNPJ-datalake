@@ -129,6 +129,26 @@ Motivacao:
 Implicacao operacional:
 - apos reset ou ambiente novo, e necessario repovoar a Gold antes de validar o agente.
 
+### Views Gold oficiais para consumo
+
+As views oficiais de consumo para aplicacoes e agente sao:
+- `cnpj_gold.vw_empresas_com_uf`
+- `cnpj_gold.vw_agente_empresas_contexto`
+- `cnpj_gold.vw_agente_estabelecimentos_contexto`
+- `cnpj_gold.vw_agente_socios_contexto`
+- `cnpj_gold.vw_agente_cnpj_consolidado`
+
+Essas cinco views sao parte do baseline de schema no arquivo `services/postgres/schemas.sql`.
+
+### Observabilidade baseline
+
+O baseline de observabilidade do projeto contem:
+- metricas de stage (runs, duracao, registros e ultimo run);
+- metricas de fallback de encoding (eventos e linhas corrigidas);
+- dashboard Grafana `cnpj-pipeline-overview` com paineis de stage e encoding fallback.
+
+Metricas e paineis experimentais de comportamento de IA/uso de objetos nao fazem parte do baseline atual.
+
 ---
 
 ## Limpezas Realizadas

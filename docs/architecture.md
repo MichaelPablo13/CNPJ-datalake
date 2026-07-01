@@ -5,6 +5,68 @@
 Pipeline Medallion (Bronze / Silver / Gold) para dados publicos da Receita Federal (CNPJ),
 processado com PySpark, armazenado no MinIO e orquestrado pelo Airflow.
 
+## Desenho de arquitetura (atualizado)
+
+```mermaid
+flowchart LR
+      subgraph Fontes[Fontes CNPJ]
+            F1[Empresas]
+            F2[Estabelecimentos]
+            F3[Socios]
+            F4[CNAEs]
+            F5[Motivos]
+            F6[Municipios]
+            F7[Naturezas]
+            F8[Paises]
+            F9[Qualificacoes]
+      end
+
+      A[Airflow DAGs\n9 pipelines]
+      B[PySpark Bronze\nparse + saneamento + fallback de encoding]
+      C[PySpark Silver\nnormalizacao + casts + qualidade]
+      D[PySpark Gold\npassthrough curado]
+
+      subgraph MinIO[MinIO]
+            M1[cnpj-bronze/version/file_type]
+            M2[cnpj-silver/version/file_type]
+            M3[cnpj-gold/version/file_type]
+      end
+
+      subgraph PG[PostgreSQL]
+            P1[cnpj_metadata.pipeline_execution]
+            P2[cnpj_gold tabelas]
+            P3[cnpj_gold views de consumo]
+      end
+
+      O1[Pushgateway]
+      O2[Prometheus]
+      O3[Grafana\nDashboard cnpj-pipeline-overview]
+
+      F1 --> A
+      F2 --> A
+      F3 --> A
+      F4 --> A
+      F5 --> A
+      F6 --> A
+      F7 --> A
+      F8 --> A
+      F9 --> A
+
+      A --> B --> C --> D
+      B --> M1
+      C --> M2
+      D --> M3
+      D --> P2
+      A --> P1
+      P2 --> P3
+
+      B --> O1
+      C --> O1
+      D --> O1
+      A --> O1
+      O1 --> O2 --> O3
+```
+
 ---
 
 ## Estrutura de pastas
@@ -109,6 +171,38 @@ data/input/Empresas*.txt
 | `cnpj_gold.qualificacoes` | codigos e descricoes | referencia |
 
 Todas tem colunas `dataset_month` e `data_version` — historico mensal preservado.
+
+## Views Gold para consumo (5 views)
+
+| View | Finalidade principal |
+|---|---|
+| `cnpj_gold.vw_empresas_com_uf` | empresas enriquecidas com UF a partir de estabelecimentos |
+| `cnpj_gold.vw_agente_empresas_contexto` | contexto sintetico de empresas para perguntas de negocio |
+| `cnpj_gold.vw_agente_estabelecimentos_contexto` | contexto de estabelecimentos com dados operacionais |
+| `cnpj_gold.vw_agente_socios_contexto` | contexto de socios e qualificacoes |
+| `cnpj_gold.vw_agente_cnpj_consolidado` | consolidado unico de CNPJ para consulta do agente |
+
+Essas views sao mantidas em `services/postgres/schemas.sql` com owner e grants para `datalake_app`.
+
+---
+
+## Observabilidade (baseline atual)
+
+Stack provisionada via `infra/docker-compose.yml`:
+- Pushgateway (`:9091`) recebe metricas do pipeline;
+- Prometheus (`:9090`) coleta do Pushgateway;
+- Grafana (`:3000`) exibe o dashboard `cnpj-pipeline-overview`.
+
+Metricas principais documentadas no baseline:
+- `cnpj_pipeline_stage_runs_total`
+- `cnpj_pipeline_stage_duration_seconds`
+- `cnpj_pipeline_records_total`
+- `cnpj_pipeline_last_stage_run_timestamp_seconds`
+- `cnpj_pipeline_encoding_fallback_events_total`
+- `cnpj_pipeline_encoding_fallback_corrected_rows_total`
+
+Painel provisionado atual: ids `1..9` (inclui fallback de encoding ids `8` e `9`).
+Nao fazem parte do baseline atual metricas/paineis experimentais de comportamento de IA ou uso de objetos.
 
 ---
 

@@ -38,6 +38,36 @@ _SILVER_CASTS: dict[str, list[tuple[str, Callable[[], F.Column]]]] = {
     ],
 }
 
+_DEFAULT_PRIMARY_KEYS: dict[str, list[str]] = {
+    "empresas": ["cnpj_basico"],
+    "estabelecimentos": ["cnpj_basico", "cnpj_ordem", "cnpj_dv"],
+    "socios": [
+        "cnpj_basico",
+        "identificador_socio",
+        "cnpj_cpf_socio",
+        "nome_socio",
+        "qualificacao_socio",
+        "data_entrada_sociedade",
+    ],
+    "cnaes": ["codigo"],
+    "motivos": ["codigo"],
+    "municipios": ["codigo"],
+    "naturezas": ["codigo"],
+    "paises": ["codigo"],
+    "qualificacoes": ["codigo"],
+}
+
+_DATE_COLUMNS: dict[str, set[str]] = {
+    "estabelecimentos": {
+        "data_situacao_cadastral",
+        "data_inicio_atividade",
+        "data_situacao_especial",
+    },
+    "socios": {
+        "data_entrada_sociedade",
+    },
+}
+
 
 class SilverLayer:
     def __init__(self, config: DataLakeConfig, spark: SparkSession | None = None):
@@ -54,17 +84,24 @@ class SilverLayer:
         df = self.spark.read.parquet(bronze_path)
         cleaned = self._normalize_strings(df)
         cleaned = self._cast_types(cleaned, file_type)
-        if primary_keys:
-            cleaned = cleaned.dropDuplicates(list(primary_keys))
+        resolved_primary_keys = self._resolve_primary_keys(file_type, primary_keys)
+        if resolved_primary_keys:
+            cleaned = cleaned.dropDuplicates(resolved_primary_keys)
 
         target_path = f"s3a://{self.config.minio.bucket_silver}/{self.config.data_version}/{file_type}/"
 
         cleaned = cleaned.cache()
         count = cleaned.count()
-        self._validate_quality(cleaned, primary_keys, count)
+        self._validate_quality(cleaned, resolved_primary_keys, count)
         cleaned.write.mode("overwrite").parquet(target_path)
         cleaned.unpersist()
         return target_path, count
+
+    @staticmethod
+    def _resolve_primary_keys(file_type: str, primary_keys: Iterable[str] | None) -> list[str]:
+        if primary_keys:
+            return list(primary_keys)
+        return _DEFAULT_PRIMARY_KEYS.get(file_type, [])
 
     def _validate_quality(
         self,
@@ -91,10 +128,18 @@ class SilverLayer:
         casts = dict(_SILVER_CASTS.get(file_type, []))
         if not casts:
             return df
-        return df.select([
-            casts[f.name]().alias(f.name) if f.name in casts else F.col(f.name)
-            for f in df.schema.fields
-        ])
+        date_columns = _DATE_COLUMNS.get(file_type, set())
+        selected_columns: list[F.Column] = []
+        for field in df.schema.fields:
+            if field.name in date_columns and f"{field.name}_raw" not in df.columns:
+                selected_columns.append(F.col(field.name).alias(f"{field.name}_raw"))
+
+            if field.name in casts:
+                selected_columns.append(casts[field.name]().alias(field.name))
+            else:
+                selected_columns.append(F.col(field.name))
+
+        return df.select(selected_columns)
 
     @staticmethod
     def _normalize_strings(df: DataFrame) -> DataFrame:

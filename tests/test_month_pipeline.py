@@ -91,6 +91,33 @@ class MonthPipelineTests(unittest.TestCase):
         self.assertEqual(row["_layout_status"], "ok")
         self.assertIn("ingestion_ts", row)
 
+    @unittest.skipIf(platform.system() == "Windows", "Instabilidade conhecida do worker PySpark no Windows para este teste de collect")
+    def test_bronze_parse_csv_rows_fills_missing_trailing_layout_columns(self):
+        config = _build_config("2026-03")
+        bronze = BronzeLayer(config, spark=self.spark)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "Estabelecimentos.txt"
+            # Linha com 30 colunas (sem extra_col_1/extra_col_2) para validar preenchimento com null.
+            source.write_text('"00000000";"0001";"01";"1";"";"02";"20091009";"00";"";"";"20091009";"8640201";"";"AV";"X";"1";"";"B";"00000000";"SP";"7107";"11";"11111111";"";"";"";"";"";"";""\n', encoding="latin1")
+            layout_columns = [
+                "cnpj_basico", "cnpj_ordem", "cnpj_dv", "identificador_matriz_filial", "nome_fantasia",
+                "situacao_cadastral", "data_situacao_cadastral", "motivo_situacao_cadastral", "nome_cidade_exterior", "pais",
+                "data_inicio_atividade", "cnae_fiscal_principal", "cnae_fiscal_secundaria", "tipo_logradouro", "logradouro",
+                "numero", "complemento", "bairro", "cep", "uf", "municipio", "ddd1", "telefone1", "ddd2",
+                "telefone2", "ddd_fax", "fax", "correio_eletronico", "situacao_especial", "data_situacao_especial",
+                "extra_col_1", "extra_col_2",
+            ]
+
+            df, _ = bronze._parse_csv_rows(str(source), layout_columns, ";")
+            row = df.collect()[0].asDict()
+
+        self.assertIsNone(row["extra_col_1"])
+        self.assertIsNone(row["extra_col_2"])
+        self.assertEqual(row["_layout_expected"], 32)
+        self.assertEqual(row["_column_count"], 30)
+        self.assertEqual(row["_layout_status"], "mismatch")
+
     def test_silver_process_preserves_dataset_month(self):
         config = _build_config("2026-03")
         fake_df = MagicMock()
@@ -115,6 +142,15 @@ class MonthPipelineTests(unittest.TestCase):
         validate_mock.assert_called_once()
         fake_df.write.mode.assert_called_once_with("overwrite")
         fake_writer.parquet.assert_called_once_with(target_path)
+
+    def test_silver_uses_default_primary_keys_when_not_provided(self):
+        resolved_empresas = SilverLayer._resolve_primary_keys("empresas", None)
+        resolved_estab = SilverLayer._resolve_primary_keys("estabelecimentos", None)
+        resolved_override = SilverLayer._resolve_primary_keys("empresas", ["foo", "bar"])
+
+        self.assertEqual(resolved_empresas, ["cnpj_basico"])
+        self.assertEqual(resolved_estab, ["cnpj_basico", "cnpj_ordem", "cnpj_dv"])
+        self.assertEqual(resolved_override, ["foo", "bar"])
 
     @unittest.skipIf(platform.system() == "Windows", "Instabilidade conhecida do worker PySpark no Windows para este teste de collect")
     def test_silver_payload_contains_cleaned_values_before_minio_write(self):
@@ -181,6 +217,21 @@ class MonthPipelineTests(unittest.TestCase):
         self.assertEqual(values[1], Decimal("120000.00"))
         self.assertEqual(values[2], Decimal("1234567.89"))
         self.assertEqual(values[3], Decimal("45.10"))
+
+    @unittest.skipIf(platform.system() == "Windows", "Instabilidade conhecida do worker PySpark no Windows para este teste de collect")
+    def test_silver_preserves_raw_date_columns_for_socios(self):
+        df = self.spark.createDataFrame(
+            [
+                ("123", "18991231"),
+            ],
+            ["cnpj_basico", "data_entrada_sociedade"],
+        )
+
+        casted = SilverLayer._cast_types(df, "socios")
+        row = casted.collect()[0].asDict()
+
+        self.assertEqual(row["data_entrada_sociedade_raw"], "18991231")
+        self.assertEqual(str(row["data_entrada_sociedade"]), "1899-12-31")
 
     def test_gold_passthrough_adds_dataset_month(self):
         config = _build_config("2026-03")

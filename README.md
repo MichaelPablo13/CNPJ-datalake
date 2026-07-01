@@ -51,6 +51,34 @@ Projeto de Data Lake profissional para ingestão, processamento e análise de da
         └────────────────────────┘
 ```
 
+### Desenho de arquitetura atualizado
+
+```mermaid
+flowchart LR
+    I[Arquivos CNPJ\n9 datasets] --> A[Airflow DAGs]
+    A --> B[Bronze\nPySpark]
+    B --> C[Silver\nPySpark]
+    C --> D[Gold\nPySpark]
+
+    B --> MB[MinIO Bronze]
+    C --> MS[MinIO Silver]
+    D --> MG[MinIO Gold]
+
+    A --> PM[Postgres Metadata\npipeline_execution]
+    D --> PG[Postgres Gold\ntabelas + 5 views]
+
+    B --> O1[Pushgateway]
+    C --> O1
+    D --> O1
+    O1 --> O2[Prometheus]
+    O2 --> O3[Grafana\ncnpj-pipeline-overview]
+```
+
+Observabilidade baseline do projeto:
+- dashboard provisionado `cnpj-pipeline-overview` com paineis de stage + fallback de encoding;
+- metricas estaveis de execucao, duracao, registros e fallback de encoding;
+- sem paineis/metricas experimentais de comportamento de IA no baseline.
+
 ---
 
 ## 🤖 Contexto do Projeto do Agente

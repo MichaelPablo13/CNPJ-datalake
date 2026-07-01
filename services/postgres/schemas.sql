@@ -392,6 +392,235 @@ CREATE TABLE IF NOT EXISTS cnpj_gold.qualificacoes (
     data_version TEXT
 );
 
+-- View de consumo para consultas de empresas com UF/municipio sem depender de join ad-hoc.
+-- Prioriza estabelecimento matriz; na ausencia, escolhe o primeiro estabelecimento disponivel.
+CREATE OR REPLACE VIEW cnpj_gold.vw_empresas_com_uf AS
+WITH estabelecimentos_preferenciais AS (
+    SELECT
+        est.cnpj_basico,
+        est.data_version,
+        est.dataset_month,
+        est.uf,
+        est.municipio,
+        ROW_NUMBER() OVER (
+            PARTITION BY est.cnpj_basico, est.data_version
+            ORDER BY
+                CASE WHEN est.identificador_matriz_filial = '1' THEN 0 ELSE 1 END,
+                est.cnpj_ordem,
+                est.cnpj_dv
+        ) AS rn
+    FROM cnpj_gold.estabelecimentos est
+)
+SELECT
+    emp.cnpj_basico,
+    emp.razao_social,
+    emp.natureza_juridica,
+    emp.qualificacao_responsavel,
+    emp.capital_social,
+    emp.porte_empresa,
+    emp.ente_federativo_responsavel,
+    est.uf AS uf,
+    est.municipio AS municipio,
+    emp.dataset_month,
+    emp.data_version
+FROM cnpj_gold.empresas emp
+LEFT JOIN estabelecimentos_preferenciais est
+    ON est.cnpj_basico = emp.cnpj_basico
+   AND est.data_version = emp.data_version
+   AND est.rn = 1;
+
+-- View orientada ao agente: um registro por CNPJ basico com contexto de localizacao e atividade principal.
+CREATE OR REPLACE VIEW cnpj_gold.vw_agente_empresas_contexto AS
+WITH empresas_preferenciais AS (
+    SELECT
+        emp.*,
+        ROW_NUMBER() OVER (
+            PARTITION BY emp.cnpj_basico, emp.data_version
+            ORDER BY emp.razao_social
+        ) AS rn
+    FROM cnpj_gold.empresas emp
+),
+estabelecimentos_preferenciais AS (
+    SELECT
+        est.*,
+        ROW_NUMBER() OVER (
+            PARTITION BY est.cnpj_basico, est.data_version
+            ORDER BY
+                CASE WHEN est.identificador_matriz_filial = '1' THEN 0 ELSE 1 END,
+                est.cnpj_ordem,
+                est.cnpj_dv
+        ) AS rn
+    FROM cnpj_gold.estabelecimentos est
+)
+SELECT
+    emp.cnpj_basico,
+    emp.razao_social,
+    emp.natureza_juridica,
+    emp.qualificacao_responsavel,
+    emp.capital_social,
+    emp.porte_empresa,
+    emp.ente_federativo_responsavel,
+    est.identificador_matriz_filial,
+    est.nome_fantasia,
+    est.situacao_cadastral,
+    est.data_inicio_atividade,
+    est.uf,
+    est.municipio AS municipio_codigo,
+    mun.descricao AS municipio_nome,
+    est.cnae_fiscal_principal,
+    cnae.descricao AS cnae_principal_descricao,
+    est.ddd1,
+    est.telefone1,
+    est.correio_eletronico,
+    emp.dataset_month,
+    emp.data_version
+FROM empresas_preferenciais emp
+LEFT JOIN estabelecimentos_preferenciais est
+    ON est.cnpj_basico = emp.cnpj_basico
+   AND est.data_version = emp.data_version
+   AND est.rn = 1
+LEFT JOIN cnpj_gold.municipios mun
+    ON mun.codigo = est.municipio
+   AND mun.data_version = est.data_version
+LEFT JOIN cnpj_gold.cnaes cnae
+    ON cnae.codigo = est.cnae_fiscal_principal
+   AND cnae.data_version = est.data_version
+WHERE emp.rn = 1;
+
+-- View orientada ao agente: detalhe de estabelecimentos com dimensoes descritivas.
+CREATE OR REPLACE VIEW cnpj_gold.vw_agente_estabelecimentos_contexto AS
+SELECT
+    est.cnpj_basico,
+    est.cnpj_ordem,
+    est.cnpj_dv,
+    (est.cnpj_basico || est.cnpj_ordem || est.cnpj_dv) AS cnpj_completo,
+    est.identificador_matriz_filial,
+    est.nome_fantasia,
+    est.situacao_cadastral,
+    est.data_situacao_cadastral,
+    est.motivo_situacao_cadastral,
+    mot.descricao AS motivo_situacao_cadastral_descricao,
+    est.data_inicio_atividade,
+    est.cnae_fiscal_principal,
+    cnae.descricao AS cnae_principal_descricao,
+    est.uf,
+    est.municipio AS municipio_codigo,
+    mun.descricao AS municipio_nome,
+    est.tipo_logradouro,
+    est.logradouro,
+    est.numero,
+    est.complemento,
+    est.bairro,
+    est.cep,
+    est.ddd1,
+    est.telefone1,
+    est.ddd2,
+    est.telefone2,
+    est.correio_eletronico,
+    est.dataset_month,
+    est.data_version
+FROM cnpj_gold.estabelecimentos est
+LEFT JOIN cnpj_gold.motivos mot
+    ON mot.codigo = est.motivo_situacao_cadastral
+   AND mot.data_version = est.data_version
+LEFT JOIN cnpj_gold.cnaes cnae
+    ON cnae.codigo = est.cnae_fiscal_principal
+   AND cnae.data_version = est.data_version
+LEFT JOIN cnpj_gold.municipios mun
+    ON mun.codigo = est.municipio
+   AND mun.data_version = est.data_version;
+
+-- View orientada ao agente: contexto de socios com qualificacao e pais.
+CREATE OR REPLACE VIEW cnpj_gold.vw_agente_socios_contexto AS
+SELECT
+    soc.cnpj_basico,
+    soc.identificador_socio,
+    soc.nome_socio,
+    soc.cnpj_cpf_socio,
+    soc.qualificacao_socio,
+    qual.descricao AS qualificacao_socio_descricao,
+    soc.data_entrada_sociedade,
+    soc.pais AS pais_codigo,
+    pai.descricao AS pais_nome,
+    soc.representante_legal,
+    soc.nome_representante,
+    soc.qualificacao_representante_legal,
+    soc.faixa_etaria,
+    soc.dataset_month,
+    soc.data_version
+FROM cnpj_gold.socios soc
+LEFT JOIN cnpj_gold.qualificacoes qual
+    ON qual.codigo = soc.qualificacao_socio
+   AND qual.data_version = soc.data_version
+LEFT JOIN cnpj_gold.paises pai
+    ON pai.codigo = soc.pais
+   AND pai.data_version = soc.data_version;
+
+-- View orientada ao agente: consolidacao por CNPJ com principal estabelecimento e contagem de socios.
+CREATE OR REPLACE VIEW cnpj_gold.vw_agente_cnpj_consolidado AS
+WITH empresas_preferenciais AS (
+    SELECT
+        emp.*,
+        ROW_NUMBER() OVER (
+            PARTITION BY emp.cnpj_basico, emp.data_version
+            ORDER BY emp.razao_social
+        ) AS rn
+    FROM cnpj_gold.empresas emp
+),
+estabelecimentos_preferenciais AS (
+    SELECT
+        est.*,
+        ROW_NUMBER() OVER (
+            PARTITION BY est.cnpj_basico, est.data_version
+            ORDER BY
+                CASE WHEN est.identificador_matriz_filial = '1' THEN 0 ELSE 1 END,
+                est.cnpj_ordem,
+                est.cnpj_dv
+        ) AS rn
+    FROM cnpj_gold.estabelecimentos est
+),
+socios_por_empresa AS (
+    SELECT
+        cnpj_basico,
+        data_version,
+        COUNT(*) AS quantidade_socios
+    FROM cnpj_gold.socios
+    GROUP BY cnpj_basico, data_version
+)
+SELECT
+    emp.cnpj_basico,
+    emp.razao_social,
+    emp.natureza_juridica,
+    emp.porte_empresa,
+    est.cnpj_ordem,
+    est.cnpj_dv,
+    est.identificador_matriz_filial,
+    est.nome_fantasia,
+    est.situacao_cadastral,
+    est.uf,
+    est.municipio AS municipio_codigo,
+    mun.descricao AS municipio_nome,
+    est.cnae_fiscal_principal,
+    cnae.descricao AS cnae_principal_descricao,
+    COALESCE(sp.quantidade_socios, 0) AS quantidade_socios,
+    emp.dataset_month,
+    emp.data_version
+FROM empresas_preferenciais emp
+LEFT JOIN estabelecimentos_preferenciais est
+    ON est.cnpj_basico = emp.cnpj_basico
+   AND est.data_version = emp.data_version
+   AND est.rn = 1
+LEFT JOIN socios_por_empresa sp
+    ON sp.cnpj_basico = emp.cnpj_basico
+   AND sp.data_version = emp.data_version
+LEFT JOIN cnpj_gold.municipios mun
+    ON mun.codigo = est.municipio
+   AND mun.data_version = est.data_version
+LEFT JOIN cnpj_gold.cnaes cnae
+    ON cnae.codigo = est.cnae_fiscal_principal
+   AND cnae.data_version = est.data_version
+WHERE emp.rn = 1;
+
 ALTER TABLE cnpj_gold.empresas                      OWNER TO datalake_owner;
 ALTER TABLE cnpj_gold.estabelecimentos              OWNER TO datalake_owner;
 ALTER TABLE cnpj_gold.socios                        OWNER TO datalake_owner;
@@ -401,8 +630,18 @@ ALTER TABLE cnpj_gold.municipios                    OWNER TO datalake_owner;
 ALTER TABLE cnpj_gold.naturezas                     OWNER TO datalake_owner;
 ALTER TABLE cnpj_gold.paises                        OWNER TO datalake_owner;
 ALTER TABLE cnpj_gold.qualificacoes                 OWNER TO datalake_owner;
+ALTER VIEW cnpj_gold.vw_empresas_com_uf             OWNER TO datalake_owner;
+ALTER VIEW cnpj_gold.vw_agente_empresas_contexto    OWNER TO datalake_owner;
+ALTER VIEW cnpj_gold.vw_agente_estabelecimentos_contexto OWNER TO datalake_owner;
+ALTER VIEW cnpj_gold.vw_agente_socios_contexto      OWNER TO datalake_owner;
+ALTER VIEW cnpj_gold.vw_agente_cnpj_consolidado     OWNER TO datalake_owner;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA cnpj_gold TO datalake_app;
+GRANT SELECT ON cnpj_gold.vw_empresas_com_uf TO datalake_app;
+GRANT SELECT ON cnpj_gold.vw_agente_empresas_contexto TO datalake_app;
+GRANT SELECT ON cnpj_gold.vw_agente_estabelecimentos_contexto TO datalake_app;
+GRANT SELECT ON cnpj_gold.vw_agente_socios_contexto TO datalake_app;
+GRANT SELECT ON cnpj_gold.vw_agente_cnpj_consolidado TO datalake_app;
 
 ALTER DEFAULT PRIVILEGES FOR ROLE datalake_owner IN SCHEMA cnpj_gold
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO datalake_app;

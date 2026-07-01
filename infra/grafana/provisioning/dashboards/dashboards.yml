@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: CNPJ DataLake Dashboards
+    orgId: 1
+    folder: CNPJ DataLake
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

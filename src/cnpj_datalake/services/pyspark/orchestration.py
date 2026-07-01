@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import dataclasses
+import time
 from pathlib import Path
 from typing import Iterable
 
 from src.cnpj_datalake.config import DataLakeConfig
 from src.cnpj_datalake.services.minio.client import MinioStorage
+from src.cnpj_datalake.services.observability.metrics import PipelineMetrics
 from src.cnpj_datalake.services.postgres.client import PostgresClient
 from src.cnpj_datalake.services.pyspark.bronze import BronzeLayer
 from src.cnpj_datalake.services.pyspark.gold import GoldLayer
@@ -37,15 +39,34 @@ def run_bronze_stage(
     data_version: str | None = None,
 ) -> str:
     config = _resolve_config(data_version)
+    metrics = PipelineMetrics(config)
     MinioStorage(config.minio).ensure_buckets()
     bronze = BronzeLayer(config)
+    started_at = time.perf_counter()
     try:
         if _is_glob(source_file):
             path, count = bronze.ingest_glob(source_pattern=source_file, file_type=file_type)
         else:
             path, count = bronze.ingest_csv(source_file=Path(source_file), file_type=file_type)
         logger.info("Bronze concluida: %s (%d registros)", path, count)
+        metrics.observe_stage(
+            stage="bronze",
+            file_type=file_type,
+            status="success",
+            duration_seconds=time.perf_counter() - started_at,
+            records=count,
+            data_version=config.data_version,
+        )
         return path
+    except Exception:
+        metrics.observe_stage(
+            stage="bronze",
+            file_type=file_type,
+            status="failed",
+            duration_seconds=time.perf_counter() - started_at,
+            data_version=config.data_version,
+        )
+        raise
     finally:
         bronze.stop()
 
@@ -57,11 +78,30 @@ def run_silver_stage(
     data_version: str | None = None,
 ) -> str:
     config = _resolve_config(data_version)
+    metrics = PipelineMetrics(config)
     silver = SilverLayer(config)
+    started_at = time.perf_counter()
     try:
         path, count = silver.process(bronze_path=bronze_path, file_type=file_type, primary_keys=primary_keys)
         logger.info("Silver concluida: %s (%d registros)", path, count)
+        metrics.observe_stage(
+            stage="silver",
+            file_type=file_type,
+            status="success",
+            duration_seconds=time.perf_counter() - started_at,
+            records=count,
+            data_version=config.data_version,
+        )
         return path
+    except Exception:
+        metrics.observe_stage(
+            stage="silver",
+            file_type=file_type,
+            status="failed",
+            duration_seconds=time.perf_counter() - started_at,
+            data_version=config.data_version,
+        )
+        raise
     finally:
         silver.stop()
 
@@ -72,11 +112,30 @@ def run_gold_stage(
     data_version: str | None = None,
 ) -> str:
     config = _resolve_config(data_version)
+    metrics = PipelineMetrics(config)
     gold = GoldLayer(config)
+    started_at = time.perf_counter()
     try:
         path, count = gold.aggregate(silver_path=silver_path, file_type=file_type)
         logger.info("Gold concluida: %s (%d registros)", path, count)
+        metrics.observe_stage(
+            stage="gold",
+            file_type=file_type,
+            status="success",
+            duration_seconds=time.perf_counter() - started_at,
+            records=count,
+            data_version=config.data_version,
+        )
         return path
+    except Exception:
+        metrics.observe_stage(
+            stage="gold",
+            file_type=file_type,
+            status="failed",
+            duration_seconds=time.perf_counter() - started_at,
+            data_version=config.data_version,
+        )
+        raise
     finally:
         gold.stop()
 
@@ -88,6 +147,8 @@ def run_pipeline(
     data_version: str | None = None,
 ) -> dict:
     config = _resolve_config(data_version)
+    metrics = PipelineMetrics(config)
+    pipeline_started_at = time.perf_counter()
     MinioStorage(config.minio).ensure_buckets()
 
     postgres = PostgresClient(config.postgres)
@@ -103,21 +164,48 @@ def run_pipeline(
         silver = SilverLayer(config, spark=spark)
         gold = GoldLayer(config, spark=spark)
 
+        bronze_started_at = time.perf_counter()
         if _is_glob(source_file):
             bronze_path, bronze_count = bronze.ingest_glob(source_pattern=source_file, file_type=file_type)
         else:
             bronze_path, bronze_count = bronze.ingest_csv(source_file=Path(source_file), file_type=file_type)
         logger.info("Bronze concluida: %s (%d registros)", bronze_path, bronze_count)
+        metrics.observe_stage(
+            stage="bronze",
+            file_type=file_type,
+            status="success",
+            duration_seconds=max(time.perf_counter() - bronze_started_at, 0.0),
+            records=bronze_count,
+            data_version=config.data_version,
+        )
 
+        silver_started_at = time.perf_counter()
         silver_path, silver_count = silver.process(
             bronze_path=bronze_path,
             file_type=file_type,
             primary_keys=primary_keys,
         )
         logger.info("Silver concluida: %s (%d registros)", silver_path, silver_count)
+        metrics.observe_stage(
+            stage="silver",
+            file_type=file_type,
+            status="success",
+            duration_seconds=max(time.perf_counter() - silver_started_at, 0.0),
+            records=silver_count,
+            data_version=config.data_version,
+        )
 
+        gold_started_at = time.perf_counter()
         gold_path, gold_count = gold.aggregate(silver_path=silver_path, file_type=file_type)
         logger.info("Gold concluida: %s (%d registros)", gold_path, gold_count)
+        metrics.observe_stage(
+            stage="gold",
+            file_type=file_type,
+            status="success",
+            duration_seconds=max(time.perf_counter() - gold_started_at, 0.0),
+            records=gold_count,
+            data_version=config.data_version,
+        )
 
         postgres.finish_pipeline_execution(
             execution_id=execution_id,
@@ -125,6 +213,15 @@ def run_pipeline(
             records_processed=bronze_count,
             records_failed=0,
             output_path=gold_path,
+        )
+
+        metrics.observe_stage(
+            stage="pipeline",
+            file_type=file_type,
+            status="success",
+            duration_seconds=max(time.perf_counter() - pipeline_started_at, 0.0),
+            records=bronze_count,
+            data_version=config.data_version,
         )
 
         logger.info("Pipeline concluido com sucesso")
@@ -142,6 +239,13 @@ def run_pipeline(
             records_processed=0,
             records_failed=1,
             output_path=None,
+        )
+        metrics.observe_stage(
+            stage="pipeline",
+            file_type=file_type,
+            status="failed",
+            duration_seconds=max(time.perf_counter() - pipeline_started_at, 0.0),
+            data_version=config.data_version,
         )
         logger.exception("Falha na execucao do pipeline: %s", exc)
         raise

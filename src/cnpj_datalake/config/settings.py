@@ -61,6 +61,10 @@ class DataLakeConfig:
     postgres: PostgresConfig
     minio: MinioConfig
     spark: SparkConfig
+    input_file_encoding: str = "latin1"
+    metrics_enabled: bool = True
+    prometheus_pushgateway_url: str = "http://localhost:9091"
+    prometheus_job_name: str = "cnpj_datalake_pipeline"
 
     @classmethod
     def from_env(cls) -> "DataLakeConfig":
@@ -103,6 +107,16 @@ class DataLakeConfig:
             postgres=postgres,
             minio=minio,
             spark=spark,
+            input_file_encoding=os.getenv("INPUT_FILE_ENCODING", "latin1").strip() or "latin1",
+            metrics_enabled=os.getenv("METRICS_ENABLED", "true").strip().lower() == "true",
+            prometheus_pushgateway_url=(
+                os.getenv("PROMETHEUS_PUSHGATEWAY_URL", "http://localhost:9091").strip()
+                or "http://localhost:9091"
+            ),
+            prometheus_job_name=(
+                os.getenv("PROMETHEUS_JOB_NAME", "cnpj_datalake_pipeline").strip()
+                or "cnpj_datalake_pipeline"
+            ),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -130,6 +144,10 @@ class DataLakeConfig:
                 "driver_memory": self.spark.driver_memory,
                 "executor_memory": self.spark.executor_memory,
             },
+            "input_file_encoding": self.input_file_encoding,
+            "metrics_enabled": self.metrics_enabled,
+            "prometheus_pushgateway_url": self.prometheus_pushgateway_url,
+            "prometheus_job_name": self.prometheus_job_name,
         }
 
 
